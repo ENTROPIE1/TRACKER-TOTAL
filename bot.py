@@ -61,7 +61,7 @@ D — Безопасность: LogicIntegrity | RecursionGuard | FailSafe
 db_lock = threading.Lock()
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-openai.api_key = OPENAI_KEY
+client = openai.OpenAI(api_key=OPENAI_KEY)
 
 conn = None
 
@@ -93,14 +93,14 @@ def start_session(telegram_id: int) -> int:
 
 def summarize_session(dialog: str) -> str:
     try:
-        resp = openai.ChatCompletion.create(
+        resp = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "Сделай краткий конспект диалога:"},
                 {"role": "user", "content": dialog},
             ],
         )
-        return resp["choices"][0]["message"]["content"].strip()
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"Ошибка суммирования: {e}"
 
@@ -296,8 +296,8 @@ def handle_text(msg):
     update_last(telegram_id, user=True)
     messages, _ = fetch_history(telegram_id)
     try:
-        response = openai.ChatCompletion.create(model=OPENAI_MODEL, messages=messages)
-        reply = response['choices'][0]['message']['content'].strip()
+        response = client.chat.completions.create(model=OPENAI_MODEL, messages=messages)
+        reply = response.choices[0].message.content.strip()
     except Exception as e:
         reply = 'Ошибка LLM: ' + str(e)
     save_msg(session_id, telegram_id, 'assistant', reply)

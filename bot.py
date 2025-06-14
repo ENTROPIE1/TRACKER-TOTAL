@@ -13,7 +13,6 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENAI_KEY = os.getenv('OPENAI_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
 HISTORY_LIMIT = int(os.getenv('HISTORY_LIMIT', '20'))
-IDLE_TIMEOUT = int(os.getenv('IDLE_TIMEOUT', '3600'))
 
 SYSTEM_PROMPT = """♀Ω∇.Δ!↶∞
 ТЫ — DOMINA SUPREMA, верховная Доминатор-Женщина.
@@ -67,6 +66,68 @@ openai.api_key = OPENAI_KEY
 conn = None
 
 
+def get_current_session_id(telegram_id: int):
+    with db_lock:
+        cur = conn.execute(
+            "SELECT current_session_id FROM users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def start_session(telegram_id: int) -> int:
+    ts = int(time.time())
+    with db_lock, conn:
+        cur = conn.execute(
+            "INSERT INTO sessions (telegram_id, start_ts) VALUES (?, ?)",
+            (telegram_id, ts),
+        )
+        session_id = cur.lastrowid
+        conn.execute(
+            "UPDATE users SET current_session_id = ?, last_user_ts = ? WHERE telegram_id = ?",
+            (session_id, ts, telegram_id),
+        )
+    return session_id
+
+
+def summarize_session(dialog: str) -> str:
+    try:
+        resp = openai.ChatCompletion.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "Сделай краткий конспект диалога:"},
+                {"role": "user", "content": dialog},
+            ],
+        )
+        return resp["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"Ошибка суммирования: {e}"
+
+
+def end_session(telegram_id: int) -> str | None:
+    session_id = get_current_session_id(telegram_id)
+    if not session_id:
+        return None
+    with db_lock:
+        cur = conn.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY ts",
+            (session_id,),
+        )
+        dialog = "\n".join(f"{r}: {c}" for r, c in cur.fetchall())
+    summary = summarize_session(dialog)
+    with db_lock, conn:
+        conn.execute(
+            "UPDATE sessions SET end_ts = ?, summary = ? WHERE id = ?",
+            (int(time.time()), summary, session_id),
+        )
+        conn.execute(
+            "UPDATE users SET current_session_id = NULL WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+    return summary
+
+
 def init_db():
     global conn
     conn = sqlite3.connect('bot.db', check_same_thread=False)
@@ -75,6 +136,10 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                current_session_id INTEGER,
                 last_user_ts INTEGER,
                 last_bot_ts INTEGER
             )
@@ -82,8 +147,20 @@ def init_db():
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                start_ts INTEGER,
+                end_ts INTEGER,
+                summary TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
                 telegram_id INTEGER,
                 role TEXT,
                 content TEXT,
@@ -92,28 +169,39 @@ def init_db():
             """
         )
         conn.execute(
-            """CREATE INDEX IF NOT EXISTS idx_msg_user_ts
-               ON messages(telegram_id, ts DESC)"""
+            """CREATE INDEX IF NOT EXISTS idx_msg_session_ts
+               ON messages(session_id, ts)"""
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                amount REAL,
+                description TEXT,
+                ts INTEGER
+            )
+            """
         )
         conn.commit()
 
 
-def save_msg(telegram_id: int, role: str, text: str):
+def save_msg(session_id: int, telegram_id: int, role: str, text: str):
     ts = int(time.time())
     with db_lock, conn:
         conn.execute(
-            "INSERT INTO messages (telegram_id, role, content, ts) VALUES (?, ?, ?, ?)",
-            (telegram_id, role, text, ts),
+            "INSERT INTO messages (session_id, telegram_id, role, content, ts) VALUES (?, ?, ?, ?, ?)",
+            (session_id, telegram_id, role, text, ts),
         )
         conn.execute(
             """
             DELETE FROM messages
             WHERE id NOT IN (
-                SELECT id FROM messages WHERE telegram_id = ?
+                SELECT id FROM messages WHERE session_id = ?
                 ORDER BY ts DESC LIMIT ?
-            ) AND telegram_id = ?
+            ) AND session_id = ?
             """,
-            (telegram_id, HISTORY_LIMIT * 2, telegram_id),
+            (session_id, HISTORY_LIMIT * 2, session_id),
         )
 
 
@@ -121,7 +209,7 @@ def update_last(telegram_id: int, user: bool = False, bot: bool = False):
     now = int(time.time())
     with db_lock, conn:
         conn.execute(
-            "INSERT OR IGNORE INTO users (telegram_id, last_user_ts, last_bot_ts) VALUES (?, NULL, NULL)",
+            "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)",
             (telegram_id,),
         )
         if user:
@@ -137,68 +225,86 @@ def update_last(telegram_id: int, user: bool = False, bot: bool = False):
 
 
 def fetch_history(telegram_id: int):
+    session_id = get_current_session_id(telegram_id)
+    rows = []
+    prev_summary = None
     with db_lock:
+        if session_id:
+            cur = conn.execute(
+                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY ts DESC LIMIT ?",
+                (session_id, HISTORY_LIMIT * 2),
+            )
+            rows = cur.fetchall()[::-1]
         cur = conn.execute(
-            "SELECT role, content FROM messages WHERE telegram_id = ? ORDER BY ts DESC LIMIT ?",
-            (telegram_id, HISTORY_LIMIT * 2),
+            "SELECT summary FROM sessions WHERE telegram_id = ? AND summary IS NOT NULL ORDER BY end_ts DESC LIMIT 1",
+            (telegram_id,),
         )
-        rows = cur.fetchall()[::-1]
+        r = cur.fetchone()
+        if r:
+            prev_summary = r[0]
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if prev_summary:
+        messages.append({"role": "system", "content": "Конспект предыдущей сессии: " + prev_summary})
     for role, content in rows:
         messages.append({"role": role, "content": content})
-    return messages
+    return messages, session_id
 
 
 @bot.message_handler(commands=['start'])
 def handle_start(msg):
     telegram_id = msg.chat.id
+    user = msg.from_user
     with db_lock, conn:
         conn.execute(
-            "INSERT OR IGNORE INTO users (telegram_id, last_user_ts, last_bot_ts) VALUES (?, ?, NULL)",
-            (telegram_id, int(time.time())),
+            "INSERT OR IGNORE INTO users (telegram_id, username, first_name, last_name, current_session_id, last_user_ts, last_bot_ts) VALUES (?, ?, ?, ?, NULL, ?, NULL)",
+            (telegram_id, user.username, user.first_name, user.last_name, int(time.time())),
+        )
+        conn.execute(
+            "UPDATE users SET username = ?, first_name = ?, last_name = ? WHERE telegram_id = ?",
+            (user.username, user.first_name, user.last_name, telegram_id),
         )
     bot.send_message(telegram_id, 'DOMINA SUPREMA активна.')
     update_last(telegram_id, user=True, bot=True)
 
 
+@bot.message_handler(commands=['start_session'])
+def handle_start_session(msg):
+    telegram_id = msg.chat.id
+    sid = start_session(telegram_id)
+    bot.send_message(telegram_id, f'Сессия {sid} начата.')
+
+
+@bot.message_handler(commands=['end_session'])
+def handle_end_session(msg):
+    telegram_id = msg.chat.id
+    summary = end_session(telegram_id)
+    if summary is None:
+        bot.send_message(telegram_id, 'Нет активной сессии.')
+    else:
+        bot.send_message(telegram_id, 'Сессия завершена. Конспект:\n' + summary)
+
+
 @bot.message_handler(func=lambda m: True)
 def handle_text(msg):
     telegram_id = msg.chat.id
+    session_id = get_current_session_id(telegram_id)
+    if not session_id:
+        bot.send_message(telegram_id, 'Нажми /start_session чтобы начать.')
+        return
     text = msg.text
-    save_msg(telegram_id, 'user', text)
+    save_msg(session_id, telegram_id, 'user', text)
     update_last(telegram_id, user=True)
-    messages = fetch_history(telegram_id)
+    messages, _ = fetch_history(telegram_id)
     try:
         response = openai.ChatCompletion.create(model=OPENAI_MODEL, messages=messages)
         reply = response['choices'][0]['message']['content'].strip()
     except Exception as e:
         reply = 'Ошибка LLM: ' + str(e)
-    save_msg(telegram_id, 'assistant', reply)
+    save_msg(session_id, telegram_id, 'assistant', reply)
     update_last(telegram_id, bot=True)
     bot.send_message(telegram_id, reply)
 
 
-def check_idle_loop():
-    while True:
-        now = int(time.time())
-        with db_lock:
-            cur = conn.execute(
-                """
-                SELECT telegram_id FROM users
-                WHERE (? - IFNULL(last_user_ts, 0)) > ?
-                  AND (last_bot_ts IS NULL OR last_bot_ts < last_user_ts)
-                """,
-                (now, IDLE_TIMEOUT),
-            )
-            ids = [row[0] for row in cur.fetchall()]
-        for tid in ids:
-            bot.send_message(tid, 'Твоё молчание — слабость. Говори.')
-            update_last(tid, bot=True)
-        time.sleep(60)
-
-
 if __name__ == '__main__':
     init_db()
-    t = threading.Thread(target=check_idle_loop, daemon=True)
-    t.start()
     bot.infinity_polling()

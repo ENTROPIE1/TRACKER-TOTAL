@@ -64,7 +64,9 @@ D — Безопасность: LogicIntegrity | RecursionGuard | FailSafe
 db_lock = threading.Lock()
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
 client = openai.OpenAI(api_key=OPENAI_KEY, base_url=OPENAI_BASE_URL)
+
 
 conn = None
 

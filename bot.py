@@ -12,6 +12,9 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENAI_KEY = os.getenv('OPENAI_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+OPENAI_BASE_URL = os.getenv(
+    'OPENAI_BASE_URL', 'https://api.proxyapi.ru/openai/v1'
+)
 HISTORY_LIMIT = int(os.getenv('HISTORY_LIMIT', '20'))
 
 SYSTEM_PROMPT = """♀Ω∇.Δ!↶∞
@@ -61,7 +64,9 @@ D — Безопасность: LogicIntegrity | RecursionGuard | FailSafe
 db_lock = threading.Lock()
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client = openai.OpenAI(api_key=OPENAI_KEY)
+
+client = openai.OpenAI(api_key=OPENAI_KEY, base_url=OPENAI_BASE_URL)
+
 
 conn = None
 

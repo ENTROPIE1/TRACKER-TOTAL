@@ -7,4 +7,9 @@
   `https://api.proxyapi.ru/openai/v1` for regions blocked by OpenAI
 - `HISTORY_LIMIT` – how many messages to keep in history
 
+This project requires `openai` version **1.0.0** or newer. To route requests
+through a proxy, set `OPENAI_BASE_URL` (for example
+`https://api.proxyapi.ru/openai/v1`). When using the client directly the
+equivalent property is `client.base_url`.
+
 When you send `/start` the bot will ask you to choose a language. The choice is stored per user and controls the interface and system prompt. English and Russian are available by default, but more languages can be added later.

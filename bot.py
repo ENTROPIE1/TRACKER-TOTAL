@@ -14,20 +14,28 @@ def start(message):
     user, is_new = ensure_user(message.from_user)
     if is_new:
         bot.send_message(message.chat.id, 'Welcome! 100 bonus credits added.')
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add(types.KeyboardButton('Русский'), types.KeyboardButton('English'))
-    msg = bot.send_message(
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton('Русский', callback_data='lang_ru'),
+        types.InlineKeyboardButton('English', callback_data='lang_en'),
+    )
+    bot.send_message(
         message.chat.id,
         'Choose language / Выберите язык',
         reply_markup=markup,
     )
-    bot.register_next_step_handler(msg, process_lang)
 
 
-def process_lang(message):
-    lang = 'ru' if 'Рус' in message.text else 'en'
-    set_language(message.from_user.id, lang)
-    bot.send_message(message.chat.id, 'Language saved.')
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('lang_'))
+def process_lang(call):
+    lang = 'ru' if call.data == 'lang_ru' else 'en'
+    set_language(call.from_user.id, lang)
+    bot.answer_callback_query(call.id, 'Language saved')
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id, message_id=call.message.message_id
+    )
+    bot.send_message(call.message.chat.id, 'Language saved.')
 
 
 @bot.message_handler(commands=['profile'])

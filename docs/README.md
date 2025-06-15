@@ -1,6 +1,8 @@
 # Tracker Total Bot
 
-Minimal skeleton of a Telegram bot using pyTelegramBotAPI and OpenAI SDK.
+Minimal skeleton of a Telegram bot using pyTelegramBotAPI and OpenAI SDK. The
+project ships with a more complete SQLite schema providing users, sessions and
+ledger bookkeeping triggers.
 
 ## Setup
 1. Copy `.env.example` to `.env` and fill in your keys.
